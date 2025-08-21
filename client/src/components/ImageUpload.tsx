@@ -27,8 +27,32 @@ export function ImageUpload({ onImageUploaded }: ImageUploadProps) {
 
   const validateAndProcessFile = useCallback((file: File): Promise<FileWithPreview | null> => {
     return new Promise((resolve) => {
+      // Check for empty files first
+      if (file.size === 0) {
+        setErrorMessage('Cannot upload empty image file');
+        setUploadStatus('error');
+        resolve(null);
+        return;
+      }
+
       if (!file.type.startsWith('image/')) {
         setErrorMessage('Only image files are allowed');
+        setUploadStatus('error');
+        resolve(null);
+        return;
+      }
+
+      // Check for specific valid image MIME types
+      const validImageTypes = [
+        'image/jpeg',
+        'image/jpg', 
+        'image/png',
+        'image/gif',
+        'image/webp'
+      ];
+      
+      if (!validImageTypes.includes(file.type.toLowerCase())) {
+        setErrorMessage(`Unsupported image format: ${file.type}. Please use JPG, PNG, GIF, or WebP.`);
         setUploadStatus('error');
         resolve(null);
         return;
@@ -54,7 +78,7 @@ export function ImageUpload({ onImageUploaded }: ImageUploadProps) {
       };
       img.onerror = () => {
         URL.revokeObjectURL(preview);
-        setErrorMessage('Invalid image file');
+        setErrorMessage(`Invalid or corrupted image file: ${file.name}. The file may be damaged or contain unsupported image data.`);
         setUploadStatus('error');
         resolve(null);
       };
