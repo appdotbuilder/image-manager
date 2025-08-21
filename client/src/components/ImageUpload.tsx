@@ -1,10 +1,10 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { trpc } from '@/utils/trpc';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Upload, X, CheckCircle, AlertCircle, Image as ImageIcon } from 'lucide-react';
+import { Upload, X, CheckCircle, AlertCircle, Image as ImageIcon, Clipboard } from 'lucide-react';
 import type { UploadImageInput } from '../../../server/src/schema';
 
 interface ImageUploadProps {
@@ -23,19 +23,21 @@ export function ImageUpload({ onImageUploaded }: ImageUploadProps) {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadStatus, setUploadStatus] = useState<'idle' | 'success' | 'error'>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [showPasteHint, setShowPasteHint] = useState(false);
 
-  const handleFileSelect = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(event.target.files || []);
-    const validFiles: FileWithPreview[] = [];
-
-    files.forEach((file: File) => {
+  const validateAndProcessFile = useCallback((file: File): Promise<FileWithPreview | null> => {
+    return new Promise((resolve) => {
       if (!file.type.startsWith('image/')) {
+        setErrorMessage('Only image files are allowed');
+        setUploadStatus('error');
+        resolve(null);
         return;
       }
 
       if (file.size > 10 * 1024 * 1024) { // 10MB limit
         setErrorMessage('File size must be less than 10MB');
         setUploadStatus('error');
+        resolve(null);
         return;
       }
 
@@ -44,23 +46,44 @@ export function ImageUpload({ onImageUploaded }: ImageUploadProps) {
       // Get image dimensions
       const img = new Image();
       img.onload = () => {
-        validFiles.push({
+        resolve({
           file,
           preview,
           dimensions: { width: img.width, height: img.height }
         });
-        
-        if (validFiles.length === files.filter(f => f.type.startsWith('image/') && f.size <= 10 * 1024 * 1024).length) {
-          setSelectedFiles(validFiles);
-        }
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(preview);
+        setErrorMessage('Invalid image file');
+        setUploadStatus('error');
+        resolve(null);
       };
       img.src = preview;
     });
-
-    // Reset status
-    setUploadStatus('idle');
-    setErrorMessage(null);
   }, []);
+
+  const addFilesToSelection = useCallback(async (files: File[]) => {
+    const validFiles: FileWithPreview[] = [];
+    
+    for (const file of files) {
+      const processedFile = await validateAndProcessFile(file);
+      if (processedFile) {
+        validFiles.push(processedFile);
+      }
+    }
+
+    if (validFiles.length > 0) {
+      setSelectedFiles((prev: FileWithPreview[]) => [...prev, ...validFiles]);
+      // Reset status on successful addition
+      setUploadStatus('idle');
+      setErrorMessage(null);
+    }
+  }, [validateAndProcessFile]);
+
+  const handleFileSelect = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || []);
+    await addFilesToSelection(files);
+  }, [addFilesToSelection]);
 
   const removeFile = useCallback((index: number) => {
     setSelectedFiles((prev: FileWithPreview[]) => {
@@ -141,41 +164,125 @@ export function ImageUpload({ onImageUploaded }: ImageUploadProps) {
     event.preventDefault();
   }, []);
 
-  const handleDrop = useCallback((event: React.DragEvent) => {
+  const handleDrop = useCallback(async (event: React.DragEvent) => {
     event.preventDefault();
     const files = Array.from(event.dataTransfer.files);
-    
-    // Create a fake file input change event
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.multiple = true;
-    input.accept = 'image/*';
-    
-    // Manually trigger file processing
-    const validFiles: FileWithPreview[] = [];
-    files.forEach((file: File) => {
-      if (!file.type.startsWith('image/')) return;
-      if (file.size > 10 * 1024 * 1024) return;
+    await addFilesToSelection(files);
+  }, [addFilesToSelection]);
 
-      const preview = URL.createObjectURL(file);
-      const img = new Image();
-      img.onload = () => {
-        validFiles.push({
-          file,
-          preview,
-          dimensions: { width: img.width, height: img.height }
-        });
-        
-        if (validFiles.length === files.filter(f => f.type.startsWith('image/') && f.size <= 10 * 1024 * 1024).length) {
-          setSelectedFiles(validFiles);
+  const handlePaste = useCallback(async (event: ClipboardEvent) => {
+    const clipboardItems = event.clipboardData?.items;
+    if (!clipboardItems) return;
+
+    const imageFiles: File[] = [];
+    
+    for (let i = 0; i < clipboardItems.length; i++) {
+      const item = clipboardItems[i];
+      if (item.type.indexOf('image') === 0) {
+        const file = item.getAsFile();
+        if (file) {
+          // Create a proper filename for pasted images
+          const timestamp = new Date().getTime();
+          const extension = item.type.split('/')[1] || 'png';
+          const fileName = `pasted-image-${timestamp}.${extension}`;
+          
+          // Create a new File object with proper name
+          const namedFile = new File([file], fileName, {
+            type: item.type,
+            lastModified: Date.now()
+          });
+          
+          imageFiles.push(namedFile);
         }
-      };
-      img.src = preview;
-    });
-  }, []);
+      }
+    }
+
+    if (imageFiles.length > 0) {
+      event.preventDefault();
+      await addFilesToSelection(imageFiles);
+      setShowPasteHint(false);
+    }
+  }, [addFilesToSelection]);
+
+  const handlePasteFromClipboard = useCallback(async () => {
+    try {
+      const clipboardItems = await navigator.clipboard.read();
+      const imageFiles: File[] = [];
+
+      for (const clipboardItem of clipboardItems) {
+        for (const type of clipboardItem.types) {
+          if (type.startsWith('image/')) {
+            const blob = await clipboardItem.getType(type);
+            const timestamp = new Date().getTime();
+            const extension = type.split('/')[1] || 'png';
+            const fileName = `clipboard-image-${timestamp}.${extension}`;
+            
+            const file = new File([blob], fileName, {
+              type: type,
+              lastModified: Date.now()
+            });
+            
+            imageFiles.push(file);
+          }
+        }
+      }
+
+      if (imageFiles.length > 0) {
+        await addFilesToSelection(imageFiles);
+      } else {
+        setErrorMessage('No images found in clipboard');
+        setUploadStatus('error');
+      }
+    } catch (error) {
+      console.error('Clipboard access failed:', error);
+      setErrorMessage('Clipboard access denied. Please paste using Ctrl+V instead.');
+      setUploadStatus('error');
+    }
+  }, [addFilesToSelection]);
+
+  // Add global paste event listener
+  useEffect(() => {
+    const handleGlobalPaste = (event: ClipboardEvent) => {
+      // Only handle paste if no input is focused and we're on the upload tab
+      const activeElement = document.activeElement as HTMLElement | null;
+      const isInputFocused = activeElement?.tagName === 'INPUT' || 
+                           activeElement?.tagName === 'TEXTAREA' || 
+                           activeElement?.contentEditable === 'true';
+      
+      if (!isInputFocused) {
+        handlePaste(event);
+      }
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      // Show paste hint when Ctrl+V is pressed (but don't interfere with actual paste)
+      if ((event.ctrlKey || event.metaKey) && event.key === 'v') {
+        setShowPasteHint(true);
+        setTimeout(() => setShowPasteHint(false), 3000);
+      }
+    };
+
+    document.addEventListener('paste', handleGlobalPaste);
+    document.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.removeEventListener('paste', handleGlobalPaste);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [handlePaste]);
 
   return (
     <div className="space-y-6">
+      {/* Paste Hint */}
+      {showPasteHint && (
+        <Alert className="border-blue-200 bg-blue-50">
+          <Clipboard className="h-4 w-4 text-blue-600" />
+          <AlertDescription className="text-blue-800">
+            Paste your images now! Images from your clipboard will be automatically added.
+          </AlertDescription>
+        </Alert>
+      )}
+
       {/* Upload Area */}
       <Card>
         <CardContent className="p-6">
@@ -190,10 +297,10 @@ export function ImageUpload({ onImageUploaded }: ImageUploadProps) {
               </div>
               <div>
                 <h3 className="text-lg font-medium text-gray-900">
-                  Drop images here or click to upload
+                  Drop images here, paste from clipboard, or click to upload
                 </h3>
                 <p className="text-sm text-gray-500">
-                  Supports JPG, PNG, GIF up to 10MB
+                  Supports JPG, PNG, GIF up to 10MB • Use Ctrl+V to paste images
                 </p>
               </div>
               <input
@@ -205,19 +312,30 @@ export function ImageUpload({ onImageUploaded }: ImageUploadProps) {
                 id="file-upload"
                 disabled={isUploading}
               />
-              <label htmlFor="file-upload">
+              <div className="flex gap-2">
+                <label htmlFor="file-upload">
+                  <Button 
+                    variant="outline" 
+                    disabled={isUploading}
+                    className="cursor-pointer"
+                    asChild
+                  >
+                    <span>
+                      <ImageIcon className="w-4 h-4 mr-2" />
+                      Select Images
+                    </span>
+                  </Button>
+                </label>
                 <Button 
                   variant="outline" 
+                  onClick={handlePasteFromClipboard}
                   disabled={isUploading}
-                  className="cursor-pointer"
-                  asChild
+                  className="text-blue-600 border-blue-200 hover:bg-blue-50"
                 >
-                  <span>
-                    <ImageIcon className="w-4 h-4 mr-2" />
-                    Select Images
-                  </span>
+                  <Clipboard className="w-4 h-4 mr-2" />
+                  Paste from Clipboard
                 </Button>
-              </label>
+              </div>
             </div>
           </div>
         </CardContent>
@@ -246,14 +364,22 @@ export function ImageUpload({ onImageUploaded }: ImageUploadProps) {
                     <X className="w-3 h-3" />
                   </button>
                   <div className="mt-1">
-                    <p className="text-xs text-gray-600 truncate">
+                    <p className="text-xs text-gray-600 truncate" title={fileWithPreview.file.name}>
                       {fileWithPreview.file.name}
                     </p>
-                    <p className="text-xs text-gray-400">
-                      {fileWithPreview.dimensions && 
-                        `${fileWithPreview.dimensions.width}×${fileWithPreview.dimensions.height}`
-                      }
-                    </p>
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-gray-400">
+                        {fileWithPreview.dimensions && 
+                          `${fileWithPreview.dimensions.width}×${fileWithPreview.dimensions.height}`
+                        }
+                      </span>
+                      {fileWithPreview.file.name.startsWith('pasted-image-') || 
+                       fileWithPreview.file.name.startsWith('clipboard-image-') ? (
+                        <span className="text-blue-600 flex items-center">
+                          <Clipboard className="w-3 h-3" />
+                        </span>
+                      ) : null}
+                    </div>
                   </div>
                 </div>
               ))}
@@ -310,6 +436,33 @@ export function ImageUpload({ onImageUploaded }: ImageUploadProps) {
             {errorMessage}
           </AlertDescription>
         </Alert>
+      )}
+
+      {/* Instructions */}
+      {selectedFiles.length === 0 && uploadStatus === 'idle' && (
+        <Card className="border-blue-200 bg-blue-50/30">
+          <CardContent className="p-4">
+            <div className="text-center space-y-2">
+              <div className="flex justify-center items-center space-x-4 text-sm text-blue-800">
+                <div className="flex items-center">
+                  <ImageIcon className="w-4 h-4 mr-1" />
+                  Click to select
+                </div>
+                <div className="flex items-center">
+                  <Upload className="w-4 h-4 mr-1" />
+                  Drag & drop
+                </div>
+                <div className="flex items-center">
+                  <Clipboard className="w-4 h-4 mr-1" />
+                  Paste (Ctrl+V)
+                </div>
+              </div>
+              <p className="text-xs text-blue-600">
+                All images will show a preview before upload and be automatically processed for background removal
+              </p>
+            </div>
+          </CardContent>
+        </Card>
       )}
     </div>
   );
