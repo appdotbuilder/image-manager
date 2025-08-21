@@ -1,11 +1,32 @@
+import { db } from '../db';
+import { imagesTable, processedImagesTable } from '../db/schema';
+import { eq } from 'drizzle-orm';
+
 export const deleteImage = async (id: number): Promise<{ success: boolean }> => {
-    // This is a placeholder declaration! Real code should be implemented here.
-    // The goal of this handler is:
-    // 1. Find the image record by ID
-    // 2. Delete all associated processed images and their files from storage
-    // 3. Delete the original image file from storage
-    // 4. Remove the image record from the database
-    // 5. Return success status
-    
-    return Promise.resolve({ success: true });
+  try {
+    // First, check if the image exists
+    const images = await db.select()
+      .from(imagesTable)
+      .where(eq(imagesTable.id, id))
+      .execute();
+
+    if (images.length === 0) {
+      throw new Error(`Image with id ${id} not found`);
+    }
+
+    // Delete all associated processed images first (due to foreign key constraint)
+    await db.delete(processedImagesTable)
+      .where(eq(processedImagesTable.original_image_id, id))
+      .execute();
+
+    // Delete the original image record
+    await db.delete(imagesTable)
+      .where(eq(imagesTable.id, id))
+      .execute();
+
+    return { success: true };
+  } catch (error) {
+    console.error('Image deletion failed:', error);
+    throw error;
+  }
 };
