@@ -130,10 +130,10 @@ export function ImageUpload({ onImageUploaded }: ImageUploadProps) {
           height: fileWithPreview.dimensions?.height || null
         };
 
-        await trpc.uploadImage.mutate(uploadInput);
-
-        // Trigger background processing
+        // Upload image and get the returned image object
         const uploadedImage = await trpc.uploadImage.mutate(uploadInput);
+        
+        // Trigger background processing using the uploaded image ID
         await trpc.processImage.mutate({
           image_id: uploadedImage.id,
           processing_type: 'background_removal'
